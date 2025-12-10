@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Image Toolkit — Frontend</title>
+  <style>
+    :root{ --bg:#f5f7fb; --card:#fff; --text:#122; --accent:#2b7cff; }
+    [data-theme="dark"]{ --bg:#0b0f16; --card:#0f1720; --text:#e6eef8; --accent:#6ea8ff; }
+    body{font-family:Inter,system-ui,Segoe UI,Roboto;margin:0;background:var(--bg);color:var(--text);}
+    /* Background image using your uploaded sample path */
+    body::before{
+      content:"";
+      position:fixed; inset:0;
+      background-image: url("/mnt/data/955a68f8-71ee-4efa-86ed-09e574d6506e.png");
+      background-size:cover; background-position:center;
+      opacity:0.08; pointer-events:none; z-index:-1;
+    }
+    .app{max-width:1200px;margin:24px auto;padding:16px;display:grid;grid-template-columns:320px 1fr;gap:18px;}
+    .card{background:var(--card);border-radius:12px;padding:14px;box-shadow:0 6px 24px rgba(3,12,26,0.06);}
+    label{display:block;font-size:13px;margin-bottom:6px}
+    input[type="range"]{width:100%}
+    .controls{display:flex;gap:8px;flex-wrap:wrap}
+    button{background:var(--accent);border:none;color:white;padding:8px 10px;border-radius:8px;cursor:pointer}
+    button.ghost{background:transparent;border:1px solid rgba(0,0,0,0.08);color:var(--text)}
+    .canvas-wrap{display:flex;align-items:center;justify-content:center;min-height:400px}
+    canvas{max-width:100%;max-height:70vh;border-radius:8px}
+    .feature-output{max-height:200px;overflow:auto;padding:6px;border-radius:6px;background:#fbfdff;border:1px solid #eef4ff}
+  </style>
+</head>
+<body>
+  <div class="app" id="app" data-theme="light">
+    <div class="card sidebar">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <strong>Image Toolkit</strong>
+        <button id="themeBtn" class="ghost">Dark</button>
+      </div>
+
+      <div style="margin-bottom:10px">
+        <label>Upload Image</label>
+        <input type="file" id="file" accept="image/*" />
+      </div>
+
+      <div style="margin-top:8px">
+        <label>Feature Extraction</label>
+        <select id="featSelect" style="width:100%;padding:6px;border-radius:6px">
+          <option>LBP</option>
+          <option>Hu Moments</option>
+          <option>Orientation Histogram (HOG-like)</option>
+        </select>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button id="applyFeat">Apply Feature Extraction</button>
+          <button id="resetFeat" class="ghost">Reset Image</button>
+        </div>
+      </div>
+
+      <div style="margin-top:10px">
+        <div class="small">Feature output</div>
+        <div class="feature-output" id="featOut">No features yet.</div>
+      </div>
+
+      <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
+        <button id="undo" class="ghost">Undo</button>
+        <button id="redo" class="ghost">Redo</button>
+        <button id="download">Download</button>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+          <div><strong id="filename">No file</strong></div>
+          <div style="flex:1"></div>
+          <div style="font-size:13px">Compare <input type="checkbox" id="compare"/></div>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="canvas"></canvas>
+        </div>
+      </div>
+      <div style="margin-top:12px" class="card small">
+        Tip: LBP and Orientation hist are implemented in JS; Hu Moments uses OpenCV.js (CDN). For offline, download opencv.js and reference locally.
+      </div>
+    </div>
+  </div>
+
+  <!-- OpenCV.js CDN (used for Hu Moments) -->
+  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();" ></script>
+
+  <script>
+  // minimal JS: load images, LBP, Orientation hist, Hu Moments using OpenCV.js
+  const fileInput = document.getElementById('file');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const featSelect = document.getElementById('featSelect');
+  const applyFeat = document.getElementById('applyFeat');
+  const featOut = document.getElementById('featOut');
+  const resetFeat = document.getElementById('resetFeat');
+  const downloadBtn = document.getElementById('download');
+  const filenameEl = document.getElementById('filename');
+
+  let baseImage = null; // Image()
+  let history = [], redoStack = [];
+
+  function pushHistory() { history.push(ctx.getImageData(0,0,canvas.width,canvas.height)); if(history.length>30) history.shift(); redoStack=[]; }
+  function drawImage(img){
+    canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.drawImage(img,0,0);
+    pushHistory();
+  }
+
+  fileInput.addEventListener('change', (e)=> {
+    const f = e.target.files[0]; if(!f) return;
+    filenameEl.textContent = f.name;
+    const url = URL.createObjectURL(f);
+    const img = new Image(); img.crossOrigin="anonymous";
+    img.onload = ()=>{ baseImage = img; drawImage(img); }
+    img.src = url;
+  });
+
+  // LBP in JS
+  function lbpJS(gray, w, h){
+    const outW = w-2, outH = h-2;
+    const out = new Uint8ClampedArray(outW*outH);
+    for(let y=1;y<h-1;y++){
+      for(let x=1;x<w-1;x++){
+        const c = gray[y*w + x];
+        let code = 0;
+        code |= (gray[(y-1)*w + (x-1)] >= c) << 7;
+        code |= (gray[(y-1)*w + (x)] >= c) << 6;
+        code |= (gray[(y-1)*w + (x+1)] >= c) << 5;
+        code |= (gray[(y)*w + (x+1)] >= c) << 4;
+        code |= (gray[(y+1)*w + (x+1)] >= c) << 3;
+        code |= (gray[(y+1)*w + (x)] >= c) << 2;
+        code |= (gray[(y+1)*w + (x-1)] >= c) << 1;
+        code |= (gray[(y)*w + (x-1)] >= c) << 0;
+        out[(y-1)*outW + (x-1)] = code;
+      }
+    }
+    return {data: out, w: outW, h: outH};
+  }
+
+  function computeGrayArray(imgData){
+    const w = imgData.width, h = imgData.height;
+    const gray = new Uint8Array(w*h);
+    for(let i=0, j=0;i<imgData.data.length;i+=4,j++){
+      gray[j] = Math.round(0.299*imgData.data[i] + 0.587*imgData.data[i+1] + 0.114*imgData.data[i+2]);
+    }
+    return {gray, w, h};
+  }
+
+  // OpenCV.js ready flag
+  let cvReady = false;
+  function onOpenCvReady(){ cvReady = true; console.log('OpenCV.js ready'); }
+
+  applyFeat.addEventListener('click', async ()=>{
+    const method = featSelect.value;
+    featOut.innerText = 'Processing...';
+    const imgData = ctx.getImageData(0,0,canvas.width,canvas.height);
+    const {gray, w, h} = computeGrayArray(imgData);
+
+    if(method === 'LBP'){
+      const res = lbpJS(gray, w, h);
+      const outCanvas = document.createElement('canvas'); outCanvas.width = res.w; outCanvas.height = res.h;
+      const octx = outCanvas.getContext('2d');
+      const id = octx.createImageData(res.w, res.h);
+      for(let i=0;i<res.data.length;i++){
+        const v = res.data[i];
+        id.data[i*4+0] = v; id.data[i*4+1] = v; id.data[i*4+2] = v; id.data[i*4+3] = 255;
+      }
+      octx.putImageData(id,0,0);
+      // scale to main canvas
+      canvas.width = res.w; canvas.height = res.h;
+      ctx.drawImage(outCanvas,0,0);
+      // histogram preview & entropy
+      const hist = new Array(256).fill(0);
+      for(let i=0;i<res.data.length;i++) hist[res.data[i]]++;
+      let entropy = 0, total = res.data.length;
+      for(let b of hist){ if(b===0) continue; const p = b/total; entropy -= p * Math.log2(p); }
+      featOut.innerHTML = `<b>LBP</b><br>Size ${res.w}×${res.h}<br>Entropy: ${entropy.toFixed(3)}<br>Histogram length: ${hist.length}`;
+      pushHistory();
+      return;
+    }
+
+    if(method === 'Hu Moments'){
+      if(!cvReady){ featOut.innerText = 'OpenCV.js not loaded yet'; return; }
+      let src = cv.matFromImageData(imgData);
+      let grayMat = new cv.Mat();
+      if(src.channels() === 3) cv.cvtColor(src, grayMat, cv.COLOR_BGR2GRAY);
+      else grayMat = src.clone();
+      let bin = new cv.Mat();
+      cv.threshold(grayMat, bin, 0, 255, cv.THRESH_OTSU + cv.THRESH_BINARY);
+      const m = cv.moments(bin, false);
+      const hu = new cv.Mat();
+      cv.HuMoments(m, hu);
+      let out = [];
+      for(let i=0;i<7;i++){
+        const v = hu.data64F[i];
+        out.push(v === 0 ? 0 : -Math.sign(v) * Math.log10(Math.abs(v)));
+      }
+      featOut.innerHTML = `<b>Hu Moments (log10)</b><br>${out.map((v,i)=>`H${i+1}: ${v.toFixed(4)}`).join('<br>')}`;
+      // cleanup
+      src.delete(); grayMat.delete(); bin.delete(); hu.delete();
+      return;
+    }
+
+    if(method === 'Orientation Histogram (HOG-like)'){
+      // simple JS orientation histogram from sobel grads
+      // compute sobel approximations
+      const gx = new Float32Array(w*h);
+      const gy = new Float32Array(w*h);
+      function idx(x,y){ return y*w + x; }
+      for(let y=1;y<h-1;y++){
+        for(let x=1;x<w-1;x++){
+          const sx = -gray[idx(x-1,y-1)] - 2*gray[idx(x-1,y)] - gray[idx(x-1,y+1)]
+                     + gray[idx(x+1,y-1)] + 2*gray[idx(x+1,y)] + gray[idx(x+1,y+1)];
+          const sy = -gray[idx(x-1,y-1)] - 2*gray[idx(x,y-1)] - gray[idx(x+1,y-1)]
+                     + gray[idx(x-1,y+1)] + 2*gray[idx(x,y+1)] + gray[idx(x+1,y+1)];
+          gx[idx(x,y)] = sx; gy[idx(x,y)] = sy;
+        }
+      }
+      const bins = 9; const hist = new Array(bins).fill(0);
+      for(let y=1;y<h-1;y++){
+        for(let x=1;x<w-1;x++){
+          const gxx = gx[idx(x,y)], gyy = gy[idx(x,y)];
+          const mag = Math.hypot(gxx, gyy);
+          let ang = Math.atan2(gyy, gxx) * (180/Math.PI);
+          if(ang < 0) ang += 180;
+          const bin = Math.floor(ang / (180/bins));
+          const bidx = Math.min(bins-1, Math.max(0, bin));
+          hist[bidx] += mag;
+        }
+      }
+      const sum = hist.reduce((a,b)=>a+b,0) + 1e-12;
+      for(let i=0;i<hist.length;i++) hist[i] /= sum;
+      featOut.innerHTML = `<b>Orientation histogram (9 bins)</b><br>${hist.map((v,i)=>`bin${i}: ${v.toFixed(3)}`).join('<br>')}`;
+      // draw small bar chart on canvas
+      const cvw = bins*20, cvh = 120;
+      const g = document.createElement('canvas'); g.width = cvw; g.height = cvh;
+      const gctx = g.getContext('2d');
+      const maxv = Math.max(...hist);
+      for(let i=0;i<bins;i++){
+        const hval = (hist[i]/(maxv+1e-12))*100;
+        gctx.fillStyle = '#2b7cff';
+        gctx.fillRect(i*20+4, cvh - hval - 10, 12, hval);
+      }
+      canvas.width = g.width; canvas.height = g.height;
+      ctx.drawImage(g,0,0);
+      pushHistory();
+      return;
+    }
+  });
+
+  resetFeat.addEventListener('click', ()=>{ if(baseImage) drawImage(baseImage); featOut.innerText='No features yet.'; });
+
+  downloadBtn.addEventListener('click', ()=>{ const a=document.createElement('a'); a.href=canvas.toDataURL('image/png'); a.download='processed.png'; a.click(); });
+
+  // optional: try to load sample image (adjust path if not present locally)
+  (function tryLoadSample(){
+    const sample = "/mnt/data/955a68f8-71ee-4efa-86ed-09e574d6506e.png";
+    const img = new Image(); img.crossOrigin="anonymous";
+    img.onload = ()=>{ baseImage = img; drawImage(img); filenameEl.textContent = sample.split('/').pop(); }
+    img.onerror = ()=>{ /* ignore if not present */ };
+    img.src = sample;
+  })();
+
+  </script>
+</body>
+</html>
